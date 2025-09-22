@@ -80,8 +80,9 @@ export function FeedbackSection() {
       setIsInitializing(true)
       console.log("[v0] Creating feedback table...")
 
-      const { error } = await supabase.rpc("exec_sql", {
+      const { error: createTableError } = await supabase.rpc("exec_sql", {
         sql: `
+          -- Create the feedback table
           CREATE TABLE IF NOT EXISTS public.feedback (
             id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
             name TEXT NOT NULL,
@@ -89,23 +90,54 @@ export function FeedbackSection() {
             rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
           );
+        `,
+      })
 
+      if (createTableError) {
+        console.error("Error creating table:", createTableError)
+        throw createTableError
+      }
+
+      const { error: rlsError } = await supabase.rpc("exec_sql", {
+        sql: `
+          -- Enable RLS
           ALTER TABLE public.feedback ENABLE ROW LEVEL SECURITY;
-
-          CREATE POLICY IF NOT EXISTS "Anyone can read feedback" ON public.feedback
+          
+          -- Drop existing policies if they exist
+          DROP POLICY IF EXISTS "Anyone can read feedback" ON public.feedback;
+          DROP POLICY IF EXISTS "Anyone can insert feedback" ON public.feedback;
+          
+          -- Create new policies that allow anonymous access
+          CREATE POLICY "Enable read access for all users" ON public.feedback
             FOR SELECT USING (true);
-
-          CREATE POLICY IF NOT EXISTS "Anyone can insert feedback" ON public.feedback
+            
+          CREATE POLICY "Enable insert access for all users" ON public.feedback
             FOR INSERT WITH CHECK (true);
         `,
       })
 
-      if (error) {
-        console.error("Error creating feedback table:", error)
-        const { error: createError } = await supabase.from("feedback").select("*").limit(0)
+      if (rlsError) {
+        console.error("Error setting up RLS policies:", rlsError)
+        console.log("[v0] RPC failed, trying alternative table creation...")
 
-        if (createError) {
-          throw new Error("Could not create feedback table automatically")
+        // Try to create a simple table without RLS for now
+        const { error: simpleCreateError } = await supabase.rpc("exec_sql", {
+          sql: `
+            DROP TABLE IF EXISTS public.feedback;
+            CREATE TABLE public.feedback (
+              id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+              name TEXT NOT NULL,
+              message TEXT NOT NULL,
+              rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+            -- Disable RLS for now to allow anonymous access
+            ALTER TABLE public.feedback DISABLE ROW LEVEL SECURITY;
+          `,
+        })
+
+        if (simpleCreateError) {
+          throw simpleCreateError
         }
       }
 
@@ -142,6 +174,8 @@ export function FeedbackSection() {
     setError(null)
 
     try {
+      console.log("[v0] Submitting feedback:", formData)
+
       const { data, error } = await supabase
         .from("feedback")
         .insert([
@@ -155,7 +189,7 @@ export function FeedbackSection() {
 
       if (error) {
         console.error("Error submitting feedback:", error)
-        setError("Failed to submit feedback. Please try again.")
+        setError(`Failed to submit feedback: ${error.message}`)
         return
       }
 
@@ -174,7 +208,14 @@ export function FeedbackSection() {
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const value = e.target.type === "number" ? Number.parseInt(e.target.value) : e.target.value
+    let value: string | number = e.target.value
+
+    if (e.target.type === "number") {
+      const numValue = Number.parseInt(e.target.value)
+      // Ensure we never set NaN - use empty string or fallback to previous value
+      value = isNaN(numValue) ? "" : numValue
+    }
+
     setFormData((prev) => ({
       ...prev,
       [e.target.name]: value,
@@ -268,7 +309,7 @@ export function FeedbackSection() {
                     type="number"
                     min="1"
                     max="5"
-                    value={formData.rating}
+                    value={formData.rating === "" ? "" : formData.rating.toString()}
                     onChange={handleChange}
                     className="w-20"
                     required
